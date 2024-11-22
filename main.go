@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 
@@ -36,7 +38,7 @@ func main() {
 }
 
 func (g *gui) content() fyne.CanvasObject {
-	opennewproject := g.openfolder("Open Folder With Images", nil, func(lu fyne.ListableURI, u []fyne.URI) {
+	asdir := g.openfolder("Open Folder With Images", nil, func(lu fyne.ListableURI, u []fyne.URI) {
 		entries := make(map[string]imageEntry)
 
 		for _, fileuri := range u {
@@ -60,44 +62,16 @@ func (g *gui) content() fyne.CanvasObject {
 			}
 
 			if extension == ".txt" {
-				// load tags
-				s := bufio.NewScanner(content)
-				var tags []string
-				for s.Scan() {
-					for _, tag := range strings.Split(s.Text(), ",") {
-						trimmed := strings.TrimSpace(tag)
-						if trimmed == "" {
-							continue
-						}
-						tags = append(tags, trimmed)
-					}
-				}
-
-				// remove dupes
-				foundtags := make(map[string]struct{})
-				for _, tag := range tags {
-					_, exists := foundtags[tag]
-					if !exists {
-						foundtags[tag] = struct{}{}
-						knowndata.Tags = append(knowndata.Tags, tag)
-					}
-				}
+				knowndata.Tags = loadtags(content)
 
 			} else {
-				// load image
-				goimg, _, err := image.Decode(content)
+				nih, err := loadimage(content)
 				if err != nil {
 					dialog.ShowError(fmt.Errorf("failed to decode image: %w", err), g.w)
 					goto itsthisorgettingannoyedbydeferinsideloop
 				}
-
+				knowndata.loadedImage = nih
 				knowndata.ImagePath = fileuri
-				img := canvas.NewImageFromImage(goimg)
-				neww, newh := calculateNewResolution(goimg.Bounds().Dx(), goimg.Bounds().Dy(), 256)
-				img.SetMinSize(fyne.Size{Width: float32(neww), Height: float32(newh)})
-				img.FillMode = canvas.ImageFillContain
-				img.ScaleMode = canvas.ImageScaleSmooth
-				knowndata.loadedImage = NewImageHighlightable(img)
 			}
 
 			entries[key] = knowndata
@@ -128,9 +102,110 @@ func (g *gui) content() fyne.CanvasObject {
 
 		g.w.SetContent(g.projectview(project))
 	})
-	opennewproject.Tapped(&fyne.PointEvent{})
 
-	return container.NewCenter(opennewproject)
+	asjsonl := g.openfile("Open JSONL", nil, func(uc fyne.URIReadCloser) bool {
+		defer uc.Close()
+		parent2, err := storage.Parent(uc.URI())
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("could not get parent for the jsonl: %w", err), g.w)
+			return false
+		}
+		parent, err := storage.ListerForURI(parent2)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("could not get lister for the jsonl parent: %w", err), g.w)
+			return false
+		}
+
+		project := projectStructure{parentdir: parent}
+
+		entries := bufio.NewScanner(uc)
+		for entries.Scan() {
+			var jsonlline jsonlentry
+			err := json.Unmarshal(entries.Bytes(), &jsonlline)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("error unmarshalling line: %w", err), g.w)
+				return false
+			}
+
+			ie := imageEntry{
+				ImagePath: storage.NewFileURI(jsonlline.Image),
+				Tags:      loadtags(strings.NewReader(jsonlline.Text)),
+				mask:      jsonlline.Mask,
+			}
+
+			content, err := storage.Reader(ie.ImagePath)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("failed to read file: %w", err), g.w)
+				continue
+			}
+
+			nih, err := loadimage(content)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("failed to decode image: %w", err), g.w)
+				goto itsthisorgettingannoyedbydeferinsideloop2
+			}
+			ie.loadedImage = nih
+
+			project.data = append(project.data, ie)
+
+		itsthisorgettingannoyedbydeferinsideloop2: // cope and seethe about it yet again
+			content.Close()
+		}
+
+		if len(project.data) < 1 {
+			dialog.ShowError(fmt.Errorf("there was nothing useable in this jsonl"), g.w)
+			return false
+		}
+		slices.SortFunc(project.data, func(a, b imageEntry) int {
+			return strings.Compare(a.ImagePath.Path(), b.ImagePath.Path())
+		})
+
+		g.w.SetContent(g.projectview(project))
+		return true
+	})
+
+	return container.NewCenter(container.NewGridWithColumns(2, asjsonl, asdir))
+}
+
+func loadtags(r io.Reader) []string {
+	s := bufio.NewScanner(r)
+	var tags []string
+	for s.Scan() {
+		for _, tag := range strings.Split(s.Text(), ",") {
+			trimmed := strings.TrimSpace(tag)
+			if trimmed == "" {
+				continue
+			}
+			tags = append(tags, trimmed)
+		}
+	}
+
+	final := make([]string, 0, len(tags))
+	// remove dupes
+	foundtags := make(map[string]struct{})
+	for _, tag := range tags {
+		_, exists := foundtags[tag]
+		if !exists {
+			foundtags[tag] = struct{}{}
+			final = append(final, tag)
+		}
+	}
+
+	return final
+}
+
+func loadimage(r io.Reader) (*ImageHighlightable, error) {
+	goimg, _, err := image.Decode(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode image: %w", err)
+	}
+
+	img := canvas.NewImageFromImage(goimg)
+	neww, newh := calculateNewResolution(goimg.Bounds().Dx(), goimg.Bounds().Dy(), 256)
+	img.SetMinSize(fyne.Size{Width: float32(neww), Height: float32(newh)})
+	img.FillMode = canvas.ImageFillContain
+	img.ScaleMode = canvas.ImageScaleSmooth
+	return NewImageHighlightable(img), nil
 }
 
 func calculateNewResolution[RR LooksLikeNumber](width, height, maxside RR) (RR, RR) {

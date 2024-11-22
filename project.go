@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,40 +21,103 @@ type imageEntry struct {
 	Tags      []string
 	//
 	loadedImage *ImageHighlightable
+	// for jsonl to jsonl only
+	mask *string
 }
 
 type projectStructure struct {
 	parentdir fyne.ListableURI
 	data      []imageEntry
-	//
 }
 
-func (p *projectStructure) save() error {
+type jsonlentry struct {
+	Image string  `json:"image"`
+	Text  string  `json:"text"`
+	Mask  *string `json:"mask"`
+}
+
+func (g *gui) save(p *projectStructure, cb func(error)) {
+	var d dialog.Dialog
+
 	var errs []error
-	for _, d := range p.data {
-		txtfilename := strings.TrimSuffix(d.ImagePath.Name(), d.ImagePath.Extension()) + ".txt"
-
-		uri, err := storage.Child(p.parentdir, txtfilename)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-
-		uwc, err := storage.Writer(uri)
-		if err != nil {
-			errs = append(errs, err)
-			continue
-		}
-
-		_, err = io.WriteString(uwc, strings.Join(d.Tags, ", "))
-		if err != nil {
-			errs = append(errs, err)
-			//continue
-		}
-
-		uwc.Close()
+	closefunc := func() {
+		cb(errors.Join(errs...))
 	}
-	return errors.Join(errs...)
+
+	asjsonl := widget.NewButton(".jsonl file", func() {
+		jsonlfile, err := storage.Child(p.parentdir, p.parentdir.Name()+".jsonl")
+		if err != nil {
+			cb(err)
+			return
+		}
+
+		jfw, err := storage.Writer(jsonlfile)
+		if err != nil {
+			cb(err)
+			return
+		}
+		defer jfw.Close()
+
+		for _, d := range p.data {
+			entry := jsonlentry{
+				Image: d.ImagePath.Path(),
+				Text:  strings.Join(d.Tags, ", "),
+				Mask:  d.mask,
+			}
+
+			str, err := json.Marshal(entry)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+
+			jfw.Write(str)
+			jfw.Write([]byte("\n"))
+		}
+		d.Hide()
+	})
+
+	asdir := widget.NewButton(".txt files", func() {
+		for _, d := range p.data {
+			txtfilename := strings.TrimSuffix(d.ImagePath.Name(), d.ImagePath.Extension()) + ".txt"
+
+			uri, err := storage.Child(p.parentdir, txtfilename)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+
+			uwc, err := storage.Writer(uri)
+			if err != nil {
+				errs = append(errs, err)
+				continue
+			}
+
+			_, err = io.WriteString(uwc, strings.Join(d.Tags, ", "))
+			if err != nil {
+				errs = append(errs, err)
+				//continue
+			}
+
+			uwc.Close()
+		}
+		d.Hide()
+	})
+
+	d = dialog.NewCustom("Save as", "Ok", container.NewGridWithColumns(2, asjsonl, asdir), g.w)
+	d.SetOnClosed(closefunc)
+	d.Show()
+	d.Resize(d.MinSize().Add(d.MinSize()))
+}
+
+func (g *gui) saveDialogErrorAndCallbackOnSuccess(p *projectStructure, cb func()) {
+	g.save(p, func(err error) {
+		if err != nil {
+			dialog.ShowError(err, g.w)
+		} else {
+			cb()
+		}
+	})
 }
 
 func collecttags(in []imageEntry) (tags []string) {
@@ -93,18 +157,26 @@ func collecttags(in []imageEntry) (tags []string) {
 	return tags
 }
 
+func sliceAppendNoDupes(s []string, ss string) []string {
+	for _, option := range s {
+		if option == ss {
+			// already exists, bail
+			return s
+		}
+	}
+
+	// was not found, append
+	return append(s, ss)
+}
+
 func (g *gui) projectview(p projectStructure) fyne.CanvasObject {
 	g.w.SetCloseIntercept(func() {
 		dialog.ShowConfirm("Save Changes", "Do you want to save your changes?", func(b bool) {
 			if b {
-				err := p.save()
-				if err != nil {
-					dialog.ShowError(err, g.w)
-					// give the user an option to fix the issue before we wipe their work
-					return
-				}
+				g.saveDialogErrorAndCallbackOnSuccess(&p, func() { g.w.Close() })
+			} else {
+				g.w.Close()
 			}
-			g.w.Close()
 		}, g.w)
 	})
 
@@ -131,16 +203,19 @@ func (g *gui) projectview(p projectStructure) fyne.CanvasObject {
 		}
 		// add tag to tag list and apply it to current selected image if any, or all of them
 		alltagslist.Append(s)
-		alltagslist.SetSelected(append(alltagslist.Selected, s))
 
 		if addtoall.Checked {
 			for i := range p.data {
-				p.data[i].Tags = append(p.data[i].Tags, s)
+				p.data[i].Tags = sliceAppendNoDupes(p.data[i].Tags, s)
 			}
 		} else if currentselectedimageid >= 0 {
-			p.data[currentselectedimageid].Tags = append(p.data[currentselectedimageid].Tags, s)
+			p.data[currentselectedimageid].Tags = sliceAppendNoDupes(p.data[currentselectedimageid].Tags, s)
 		}
 		addtag.TypedShortcut(&fyne.ShortcutSelectAll{})
+
+		if currentselectedimageid >= 0 {
+			alltagslist.SetSelected(p.data[currentselectedimageid].Tags)
+		}
 	}
 
 	griditemsize := float32(g.a.Preferences().IntWithFallback("griditemsize", 256))
@@ -258,14 +333,7 @@ func (g *gui) projectview(p projectStructure) fyne.CanvasObject {
 
 		// manual save
 		savenow := widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
-			dialog.ShowConfirm("Save Changes", "Do you want to save your changes?", func(b bool) {
-				if b {
-					err := p.save()
-					if err != nil {
-						dialog.ShowError(err, g.w)
-					}
-				}
-			}, g.w)
+			g.saveDialogErrorAndCallbackOnSuccess(&p, func() { dialog.ShowInformation("Success", "Data Saved", g.w) })
 		})
 
 		d := dialog.NewCustomConfirm("Settings", "Ok", "Cancel", container.NewVBox(savenow, content, content2), cb, g.w)

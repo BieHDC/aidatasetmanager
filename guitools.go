@@ -49,7 +49,6 @@ func filesinfolder(lu fyne.ListableURI) []fyne.URI {
 	return files
 }
 
-/*
 // dont forget to defer uc.Close()
 func (g *gui) openfile(title string, location *fyne.ListableURI, cb func(uc fyne.URIReadCloser) bool) *widget.Button {
 	var buttonopen *widget.Button
@@ -77,11 +76,10 @@ func (g *gui) openfile(title string, location *fyne.ListableURI, cb func(uc fyne
 		d.Show()
 		d.Resize(d.MinSize().Add(d.MinSize()))
 	})
-	buttonopen.Importance = widget.WarningImportance
+	//buttonopen.Importance = widget.WarningImportance
 
 	return buttonopen
 }
-*/
 
 func currentPathAsURI(basepath string) fyne.ListableURI {
 	// if we can open the current dir, do so
@@ -100,30 +98,3 @@ func currentPathAsURI(basepath string) fyne.ListableURI {
 
 	return diruri
 }
-
-/*
-type secondaryTapper struct {
-	widget.BaseWidget
-	child fyne.CanvasObject
-	cb    func(*fyne.PointEvent)
-}
-
-var _ fyne.SecondaryTappable = (*secondaryTapper)(nil)
-
-func (st *secondaryTapper) TappedSecondary(pe *fyne.PointEvent) {
-	if st.cb == nil {
-		panic("no callback set, pointless use of widget")
-	}
-	st.cb(pe)
-}
-
-func NewSecondaryTapperLayer(child fyne.CanvasObject, cb func(*fyne.PointEvent)) *secondaryTapper {
-	st := &secondaryTapper{child: child, cb: cb}
-	st.ExtendBaseWidget(st)
-	return st
-}
-
-func (st *secondaryTapper) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(st.child)
-}
-*/
