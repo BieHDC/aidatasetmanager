@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -18,6 +19,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/storage"
+	"fyne.io/fyne/v2/widget"
 )
 
 type gui struct {
@@ -38,7 +40,7 @@ func main() {
 }
 
 func (g *gui) content() fyne.CanvasObject {
-	asdir := g.openfolder("Open Folder With Images", nil, func(lu fyne.ListableURI, u []fyne.URI) {
+	dirhandler := func(lu fyne.ListableURI, u []fyne.URI) {
 		entries := make(map[string]imageEntry)
 
 		for _, fileuri := range u {
@@ -101,9 +103,10 @@ func (g *gui) content() fyne.CanvasObject {
 		})
 
 		g.w.SetContent(g.projectview(project))
-	})
+	}
+	asdir := g.openfolder("Open Folder With Images", nil, dirhandler)
 
-	asjsonl := g.openfile("Open JSONL", nil, func(uc fyne.URIReadCloser) bool {
+	jsonlhandler := func(uc fyne.URIReadCloser) bool {
 		defer uc.Close()
 		parent2, err := storage.Parent(uc.URI())
 		if err != nil {
@@ -162,9 +165,54 @@ func (g *gui) content() fyne.CanvasObject {
 
 		g.w.SetContent(g.projectview(project))
 		return true
+	}
+	asjsonl := g.openfile("Open JSONL", nil, jsonlhandler)
+
+	g.w.SetOnDropped(func(_ fyne.Position, u []fyne.URI) {
+		if len(u) != 1 {
+			dialog.ShowError(fmt.Errorf("please only drop one file or folder"), g.w)
+			return
+		}
+
+		uri := u[0]
+		if uri.Extension() == ".jsonl" {
+			rr, err := storage.Reader(uri)
+			if err != nil {
+				dialog.ShowError(fmt.Errorf("failed to read file: %w", err), g.w)
+				return
+			}
+
+			jsonlhandler(rr)
+			g.w.SetOnDropped(nil) // disable
+
+			return // success
+		}
+
+		cl, err := storage.CanList(uri)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("cant check if uri is listable: %w", err), g.w)
+			return
+		}
+		if !cl {
+			dialog.ShowError(errors.New("dropped item is nether a jsonl nor a valid directory"), g.w)
+			return
+		}
+		lu, err := storage.ListerForURI(uri)
+		if err != nil {
+			dialog.ShowError(fmt.Errorf("cant enumerate directory: %w", err), g.w)
+			return
+		}
+
+		dirhandler(lu, filesinfolder(lu))
+		g.w.SetOnDropped(nil) // disable
 	})
 
-	return container.NewCenter(container.NewGridWithColumns(2, asjsonl, asdir))
+	return container.NewCenter(
+		container.NewGridWithColumns(1,
+			container.NewGridWithColumns(2, asjsonl, asdir),
+			container.NewCenter(widget.NewLabel("or drag and drop the item here")),
+		),
+	)
 }
 
 func loadtags(r io.Reader) []string {
